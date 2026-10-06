@@ -1,70 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-type ConversationStatus = "needs_attention" | "active" | "attended";
+type ConversationStatus =
+  | "needs_attention"
+  | "active"
+  | "attended";
 
-type Conversation = {
-  id: number;
-  name: string;
-  message: string;
-  time: string;
-  status: ConversationStatus;
-  messages: {
-    sender: "bot" | "customer";
-    text: string;
-  }[];
+type MessageSender = "bot" | "customer" | "human";
+
+type ConversationMessage = {
+  id: string;
+  sender: MessageSender;
+  text: string;
+  createdAt: string;
 };
 
-const initialConversations: Conversation[] = [
-  {
-    id: 1,
-    name: "Juan",
-    message: "Quiero hablar con alguien",
-    time: "10:42 AM",
-    status: "needs_attention",
-    messages: [
-      {
-        sender: "bot",
-        text: "👋 ¡Hola! Bienvenido a Mini Store.",
-      },
-      {
-        sender: "customer",
-        text: "Quiero hablar con alguien",
-      },
-      {
-        sender: "bot",
-        text: "Claro. Te comunico con una persona del equipo.",
-      },
-    ],
-  },
-  {
-    id: 2,
-    name: "Carlos",
-    message: "¿Qué productos tienen?",
-    time: "10:38 AM",
-    status: "active",
-    messages: [
-      {
-        sender: "customer",
-        text: "¿Qué productos tienen?",
-      },
-    ],
-  },
-  {
-    id: 3,
-    name: "Pedro",
-    message: "Gracias, eso era todo",
-    time: "10:31 AM",
-    status: "attended",
-    messages: [
-      {
-        sender: "customer",
-        text: "Gracias, eso era todo",
-      },
-    ],
-  },
-];
+type Conversation = {
+  id: string;
+  phone: string;
+  name: string | null;
+  status: ConversationStatus;
+  mode: "bot" | "human";
+  createdAt: string;
+  updatedAt: string;
+  messages: ConversationMessage[];
+};
 
 function StatusIndicator({
   status,
@@ -97,10 +58,84 @@ function StatusIndicator({
   );
 }
 
+function formatTime(dateString: string) {
+  return new Date(dateString).toLocaleTimeString("es-CO", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 export default function Home() {
-  const [conversations, setConversations] = useState(initialConversations);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messageInput, setMessageInput] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    async function loadConversations() {
+      try {
+        setLoading(true);
+
+        const response = await fetch("/api/conversations");
+
+        if (!response.ok) {
+          throw new Error("No se pudieron cargar las conversaciones");
+        }
+
+        const data = await response.json();
+
+        const normalized: Conversation[] = data.map(
+          (conversation: {
+            id: string;
+            phone: string;
+            name: string | null;
+            status: string;
+            mode: string;
+            createdAt: string;
+            updatedAt: string;
+            messages: {
+              id: string;
+              sender: string;
+              text: string;
+              createdAt: string;
+            }[];
+          }) => ({
+            ...conversation,
+            status:
+              conversation.status === "NEEDS_ATTENTION"
+                ? "needs_attention"
+                : conversation.status === "ATTENDED"
+                  ? "attended"
+                  : "active",
+            mode:
+              conversation.mode === "HUMAN"
+                ? "human"
+                : "bot",
+            messages: conversation.messages.map((message) => ({
+              ...message,
+              sender:
+                message.sender === "CUSTOMER"
+                  ? "customer"
+                  : message.sender === "HUMAN"
+                    ? "human"
+                    : "bot",
+            })),
+          })
+        );
+
+        setConversations(normalized);
+        setError("");
+      } catch (error) {
+        console.error(error);
+        setError("No se pudieron cargar las conversaciones.");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadConversations();
+  }, []);
 
   const selectedConversation = conversations.find(
     (conversation) => conversation.id === selectedId
@@ -110,7 +145,7 @@ export default function Home() {
     (conversation) => conversation.status === "needs_attention"
   );
 
-  function selectConversation(id: number) {
+  function selectConversation(id: string) {
     setSelectedId(id);
   }
 
@@ -118,28 +153,27 @@ export default function Home() {
     setSelectedId(null);
   }
 
-  function sendMessage() {
-    if (!messageInput.trim() || !selectedConversation) return;
-
-    const newMessage = messageInput.trim();
+  function markAsAttended() {
+    if (!selectedConversation) return;
 
     setConversations((current) =>
       current.map((conversation) =>
         conversation.id === selectedConversation.id
           ? {
               ...conversation,
-              status: "active",
-              message: newMessage,
-              messages: [
-                ...conversation.messages,
-                {
-                  sender: "bot",
-                  text: newMessage,
-                },
-              ],
+              status: "attended",
             }
           : conversation
       )
+    );
+  }
+
+  function sendMessage() {
+    if (!messageInput.trim() || !selectedConversation) return;
+
+    console.log(
+      "Mensaje preparado para enviar:",
+      messageInput.trim()
     );
 
     setMessageInput("");
@@ -204,7 +238,11 @@ export default function Home() {
             </p>
 
             <p className="text-4xl font-bold mt-3">
-              {conversations.length}
+              {conversations.reduce(
+                (total, conversation) =>
+                  total + conversation.messages.length,
+                0
+              )}
             </p>
           </div>
 
@@ -254,41 +292,79 @@ export default function Home() {
           </div>
 
           <div>
-            {conversations.map((conversation) => (
-              <button
-                key={conversation.id}
-                onClick={() => selectConversation(conversation.id)}
-                className="w-full text-left px-6 py-5 border-b border-zinc-800 last:border-b-0 hover:bg-zinc-800/50 transition"
-              >
-                <div className="flex items-center gap-4">
-                  <div className="h-10 w-10 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center font-semibold">
-                    {conversation.name.charAt(0)}
-                  </div>
+            {loading && (
+              <div className="p-6 text-sm text-zinc-500">
+                Cargando conversaciones...
+              </div>
+            )}
 
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-4">
-                      <p className="font-semibold">
-                        {conversation.name}
-                      </p>
+            {!loading && error && (
+              <div className="p-6 text-sm text-red-400">
+                {error}
+              </div>
+            )}
 
-                      <span className="text-xs text-zinc-500">
-                        {conversation.time}
-                      </span>
-                    </div>
-
-                    <p className="text-sm text-zinc-400 mt-1 truncate">
-                      {conversation.message}
-                    </p>
-
-                    <div className="mt-2">
-                      <StatusIndicator
-                        status={conversation.status}
-                      />
-                    </div>
-                  </div>
+            {!loading &&
+              !error &&
+              conversations.length === 0 && (
+                <div className="p-6 text-sm text-zinc-500">
+                  Todavía no hay conversaciones.
                 </div>
-              </button>
-            ))}
+              )}
+
+            {!loading &&
+              !error &&
+              conversations.map((conversation) => {
+                const lastMessage =
+                  conversation.messages[
+                    conversation.messages.length - 1
+                  ];
+
+                const displayName =
+                  conversation.name || conversation.phone;
+
+                return (
+                  <button
+                    key={conversation.id}
+                    onClick={() =>
+                      selectConversation(conversation.id)
+                    }
+                    className="w-full text-left px-6 py-5 border-b border-zinc-800 last:border-b-0 hover:bg-zinc-800/50 transition"
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className="h-10 w-10 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center font-semibold">
+                        {displayName.charAt(0)}
+                      </div>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-4">
+                          <p className="font-semibold">
+                            {displayName}
+                          </p>
+
+                          <span className="text-xs text-zinc-500">
+                            {formatTime(conversation.updatedAt)}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-zinc-600 mt-1">
+                          {conversation.phone}
+                        </p>
+
+                        <p className="text-sm text-zinc-400 mt-1 truncate">
+                          {lastMessage?.text || "Sin mensajes"}
+                        </p>
+
+                        <div className="mt-2">
+                          <StatusIndicator
+                            status={conversation.status}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
           </div>
         </section>
 
@@ -306,28 +382,24 @@ export default function Home() {
 
                 <div>
                   <p className="font-semibold">
-                    {selectedConversation.name}
+                    {selectedConversation.name ||
+                      selectedConversation.phone}
                   </p>
 
-                  <StatusIndicator
-                    status={selectedConversation.status}
-                  />
+                  <p className="text-xs text-zinc-600 mt-1">
+                    {selectedConversation.phone}
+                  </p>
+
+                  <div className="mt-1">
+                    <StatusIndicator
+                      status={selectedConversation.status}
+                    />
+                  </div>
                 </div>
               </div>
 
               <button
-                onClick={() => {
-                  setConversations((current) =>
-                    current.map((conversation) =>
-                      conversation.id === selectedConversation.id
-                        ? {
-                            ...conversation,
-                            status: "attended",
-                          }
-                        : conversation
-                    )
-                  );
-                }}
+                onClick={markAsAttended}
                 className="text-xs px-3 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition"
               >
                 Marcar como atendida
@@ -336,9 +408,9 @@ export default function Home() {
 
             <div className="p-6 space-y-4 min-h-[300px]">
               {selectedConversation.messages.map(
-                (message, index) => (
+                (message) => (
                   <div
-                    key={index}
+                    key={message.id}
                     className={`flex ${
                       message.sender === "customer"
                         ? "justify-start"
