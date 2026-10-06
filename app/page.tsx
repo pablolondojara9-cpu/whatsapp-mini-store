@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useChangeSignal } from "../hooks/useChangeSignal";
 
 type ConversationStatus =
   | "needs_attention"
@@ -72,70 +73,79 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    async function loadConversations() {
-      try {
-        setLoading(true);
+  const loadConversations = async () => {
+  try {
+    const response = await fetch("/api/conversations", {
+      cache: "no-store",
+    });
 
-        const response = await fetch("/api/conversations");
-
-        if (!response.ok) {
-          throw new Error("No se pudieron cargar las conversaciones");
-        }
-
-        const data = await response.json();
-
-        const normalized: Conversation[] = data.map(
-          (conversation: {
-            id: string;
-            phone: string;
-            name: string | null;
-            status: string;
-            mode: string;
-            createdAt: string;
-            updatedAt: string;
-            messages: {
-              id: string;
-              sender: string;
-              text: string;
-              createdAt: string;
-            }[];
-          }) => ({
-            ...conversation,
-            status:
-              conversation.status === "NEEDS_ATTENTION"
-                ? "needs_attention"
-                : conversation.status === "ATTENDED"
-                  ? "attended"
-                  : "active",
-            mode:
-              conversation.mode === "HUMAN"
-                ? "human"
-                : "bot",
-            messages: conversation.messages.map((message) => ({
-              ...message,
-              sender:
-                message.sender === "CUSTOMER"
-                  ? "customer"
-                  : message.sender === "HUMAN"
-                    ? "human"
-                    : "bot",
-            })),
-          })
-        );
-
-        setConversations(normalized);
-        setError("");
-      } catch (error) {
-        console.error(error);
-        setError("No se pudieron cargar las conversaciones.");
-      } finally {
-        setLoading(false);
-      }
+    if (!response.ok) {
+      throw new Error("No se pudieron cargar las conversaciones");
     }
 
-    loadConversations();
-  }, []);
+    const data = await response.json();
+
+    const normalized: Conversation[] = data.map(
+      (conversation: {
+        id: string;
+        phone: string;
+        name: string | null;
+        status: string;
+        mode: string;
+        createdAt: string;
+        updatedAt: string;
+        messages: {
+          id: string;
+          sender: string;
+          text: string;
+          createdAt: string;
+        }[];
+      }) => ({
+        ...conversation,
+        status:
+          conversation.status === "NEEDS_ATTENTION"
+            ? "needs_attention"
+            : conversation.status === "ATTENDED"
+              ? "attended"
+              : "active",
+        mode:
+          conversation.mode === "HUMAN"
+            ? "human"
+            : "bot",
+        messages: conversation.messages.map((message) => ({
+          ...message,
+          sender:
+            message.sender === "CUSTOMER"
+              ? "customer"
+              : message.sender === "HUMAN"
+                ? "human"
+                : "bot",
+        })),
+      })
+    );
+
+    setConversations((current) => {
+      const currentJson = JSON.stringify(current);
+      const newJson = JSON.stringify(normalized);
+
+      return currentJson === newJson ? current : normalized;
+    });
+
+    setError("");
+  } catch (error) {
+    console.error(error);
+    setError("No se pudieron cargar las conversaciones.");
+  } finally {
+    setLoading(false);
+  }
+};
+
+useEffect(() => {
+  setLoading(true);
+  loadConversations();
+}, []);
+
+useChangeSignal(loadConversations);
 
   const selectedConversation = conversations.find(
     (conversation) => conversation.id === selectedId
@@ -153,8 +163,26 @@ export default function Home() {
     setSelectedId(null);
   }
 
-  function markAsAttended() {
-    if (!selectedConversation) return;
+  async function markAsAttended() {
+  if (!selectedConversation) return;
+
+  try {
+    const response = await fetch(
+      `/api/conversations/${selectedConversation.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          status: "ATTENDED",
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error("No se pudo marcar la conversación como atendida");
+    }
 
     setConversations((current) =>
       current.map((conversation) =>
@@ -166,18 +194,96 @@ export default function Home() {
           : conversation
       )
     );
+  } catch (error) {
+    console.error("❌ Error marcando conversación como atendida:", error);
   }
+}
 
-  function sendMessage() {
-    if (!messageInput.trim() || !selectedConversation) return;
+ async function returnToBot() {
+  if (!selectedConversation) return;
 
-    console.log(
-      "Mensaje preparado para enviar:",
-      messageInput.trim()
+  try {
+    const response = await fetch(
+      `/api/conversations/${selectedConversation.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: "BOT",
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error("No se pudo devolver la conversación al bot");
+    }
+
+    setConversations((current) =>
+      current.map((conversation) =>
+        conversation.id === selectedConversation.id
+          ? {
+              ...conversation,
+              mode: "bot",
+            }
+          : conversation
+      )
+    );
+  } catch (error) {
+    console.error("❌ Error devolviendo conversación al bot:", error);
+  }
+}
+
+  async function sendMessage() {
+  if (!messageInput.trim() || !selectedConversation) return;
+
+  const text = messageInput.trim();
+
+  try {
+    const response = await fetch(
+      `/api/conversations/${selectedConversation.id}/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      }
+    );
+
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || "No se pudo enviar el mensaje");
+    }
+
+    const message = await response.json();
+
+    setConversations((current) =>
+      current.map((conversation) =>
+        conversation.id === selectedConversation.id
+          ? {
+              ...conversation,
+              messages: [
+                ...conversation.messages,
+                {
+                  id: message.id,
+                  sender: "human",
+                  text: message.text,
+                  createdAt: message.createdAt,
+                },
+              ],
+              updatedAt: message.createdAt,
+            }
+          : conversation
+      )
     );
 
     setMessageInput("");
+  } catch (error) {
+    console.error("❌ Error enviando mensaje desde el panel:", error);
   }
+}
 
   return (
     <main className="min-h-screen bg-zinc-950 text-white p-8">
@@ -398,12 +504,23 @@ export default function Home() {
                 </div>
               </div>
 
-              <button
-                onClick={markAsAttended}
-                className="text-xs px-3 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition"
-              >
-                Marcar como atendida
-              </button>
+              <div className="flex items-center gap-2">
+  {selectedConversation.mode === "human" && (
+    <button
+      onClick={returnToBot}
+      className="text-xs px-3 py-2 rounded-lg bg-green-600/15 text-green-400 hover:bg-green-600/25 transition"
+    >
+      🤖 Devolver al bot
+    </button>
+  )}
+
+  <button
+    onClick={markAsAttended}
+    className="text-xs px-3 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition"
+  >
+    Marcar como atendida
+  </button>
+</div>
             </div>
 
             <div className="p-6 space-y-4 min-h-[300px]">

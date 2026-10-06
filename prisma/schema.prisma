@@ -24,6 +24,15 @@ enum MessageSender {
   HUMAN
 }
 
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  DELIVERED
+  CANCELLED
+}
+
 model Conversation {
   id        String   @id @default(cuid())
   phone     String   @unique
@@ -34,6 +43,7 @@ model Conversation {
   updatedAt DateTime @updatedAt
 
   messages Message[]
+  orders   Order[]
 }
 
 model Message {
@@ -47,4 +57,51 @@ model Message {
 
   @@index([conversationId])
   @@index([createdAt])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  testField   String   @default("test")
+  slug        String   @unique
+  name        String
+  description String?
+  price       Int
+  stock       Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@index([active])
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  conversationId String
+  status         OrderStatus @default(PENDING)
+  total          Int
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  items        OrderItem[]
+
+  @@index([conversationId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id        String   @id @default(cuid())
+  orderId   String
+  productId String
+  quantity  Int
+  unitPrice Int
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([orderId])
+  @@index([productId])
 }
