@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "../../lib/prisma";
+import {
+  ConversationMode,
+  ConversationStatus,
+} from "../../generated/prisma/client";
 
 const VERIFY_TOKEN = "mini_store_token";
 
@@ -219,8 +223,8 @@ export async function POST(request: NextRequest) {
     });
 
     let reply = "";
-    let status = conversation.status;
-    let mode = conversation.mode;
+let status: ConversationStatus = conversation.status;
+let mode: ConversationMode = conversation.mode;
 
     /*
      * =========================================================
