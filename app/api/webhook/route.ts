@@ -77,14 +77,24 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Guardar mensaje del cliente
-    await prisma.message.create({
-      data: {
-        conversationId: conversation.id,
-        sender: "CUSTOMER",
-        text: message.text.body,
-      },
-    });
+   // Guardar mensaje del cliente
+await prisma.message.create({
+  data: {
+    conversationId: conversation.id,
+    sender: "CUSTOMER",
+    text: message.text.body,
+  },
+});
+
+// Actualizar actividad de la conversación
+conversation = await prisma.conversation.update({
+  where: {
+    id: conversation.id,
+  },
+  data: {
+    updatedAt: new Date(),
+  },
+});
 
     let reply = "";
     let status = conversation.status;
@@ -154,16 +164,17 @@ Escribe "Hola" para ver el menú.`;
       mode = "BOT";
     }
 
-    // Actualizar estado de la conversación
-    await prisma.conversation.update({
-      where: {
-        id: conversation.id,
-      },
-      data: {
-        status,
-        mode,
-      },
-    });
+  // Actualizar estado y actividad de la conversación
+conversation = await prisma.conversation.update({
+  where: {
+    id: conversation.id,
+  },
+  data: {
+    status,
+    mode,
+    updatedAt: new Date(),
+  },
+});
 
     // Enviar respuesta por WhatsApp
     const response = await fetch(
