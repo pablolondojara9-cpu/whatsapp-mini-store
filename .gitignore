@@ -41,3 +41,10 @@ yarn-error.log*
 next-env.d.ts
 
 .env.local
+
+/app/generated/prisma
+
+/.agents/
+/.claude/
+/.windsurf/
+/skills-lock.json
