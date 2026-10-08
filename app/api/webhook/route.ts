@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "../../lib/prisma";
 import { parseOrder } from "../../lib/parse-order";
 import { validateOrder } from "../../lib/validate-order";
+import { validateBusinessRules } from "../../lib/validate-business-rules";
 import {
   ConversationMode,
   ConversationStatus,
@@ -146,8 +147,9 @@ export async function POST(request: NextRequest) {
     }
 
     const from = message.from;
-    const originalText = message.text.body.trim();
-    const text = originalText.toLowerCase();
+const whatsappMessageId = message.id;
+const originalText = message.text.body.trim();
+const text = originalText.toLowerCase();
 
     const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
     const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -179,14 +181,51 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Guardar mensaje del cliente
-    await prisma.message.create({
-      data: {
-        conversationId: conversation.id,
-        sender: "CUSTOMER",
-        text: originalText,
-      },
-    });
+    // Evitar procesar dos veces el mismo mensaje de WhatsApp.
+
+if (whatsappMessageId) {
+  const alreadyProcessed = await prisma.message.findUnique({
+    where: {
+      whatsappMessageId,
+    },
+  });
+
+  if (alreadyProcessed) {
+    console.log(
+      "🔁 Mensaje de WhatsApp ya procesado. Se ignora duplicado:",
+      whatsappMessageId
+    );
+
+    return NextResponse.json({ received: true });
+  }
+}
+
+// Guardar mensaje del cliente.
+
+await prisma.message.create({
+  data: {
+    conversationId: conversation.id,
+    sender: "CUSTOMER",
+    text: originalText,
+    whatsappMessageId: whatsappMessageId ?? null,
+  },
+});
+
+const wasReminderSent =
+  conversation.inactivityStage === "REMINDER_SENT";
+
+  const isContinuationMessage = [
+  "si",
+  "sí",
+  "dale",
+  "claro",
+  "ok",
+  "okay",
+  "bueno",
+  "listo",
+  "continuemos",
+  "seguimos",
+].includes(text);
 
     // Actualizar actividad
     conversation = await prisma.conversation.update({
@@ -194,8 +233,10 @@ export async function POST(request: NextRequest) {
         id: conversation.id,
       },
       data: {
-        updatedAt: new Date(),
-      },
+  updatedAt: new Date(),
+  lastCustomerMessageAt: new Date(),
+  inactivityStage: "NONE",
+},
     });
 
     console.log("🧭 Estado actual de conversación:", conversation.step);
@@ -237,7 +278,63 @@ export async function POST(request: NextRequest) {
      * =========================================================
      */
 
-    if (conversation.step === "WAITING_ORDER") {
+    if (wasReminderSent && isContinuationMessage) {
+  status = "ACTIVE";
+  mode = "BOT";
+
+  if (conversation.step === "WAITING_ORDER") {
+    reply = `👍 ¡Claro! Seguimos con tu pedido.
+
+Puedes continuar escribiéndome los productos que deseas.`;
+  } else if (conversation.step === "CATALOG") {
+    reply = `👍 ¡Claro! Seguimos donde lo dejamos.
+
+Puedes revisar el catálogo o indicarme qué quieres pedir.`;
+
+  } else if (conversation.step === "REVIEWING_ORDER") {
+  const pendingOrder = conversation.pendingOrder as any;
+
+  if (pendingOrder?.items?.length) {
+    const lines = pendingOrder.items.map((item: any) => {
+      const base =
+        `${item.quantity} × ${item.name} — $${item.subtotal.toLocaleString("es-CO")}`;
+
+      if (!item.notes) {
+        return base;
+      }
+
+      return `${base}\n   📝 ${item.notes}`;
+    });
+
+    reply = `🛒 Tu pedido sigue aquí
+
+${lines.join("\n")}
+
+Total: $${pendingOrder.total.toLocaleString("es-CO")}
+
+¿Está correcto?
+
+1️⃣ Confirmar pedido
+2️⃣ Modificar pedido
+3️⃣ Cancelar`;
+  } else {
+    reply = `🛒 Seguimos con tu pedido.
+
+1️⃣ Confirmar pedido
+2️⃣ Modificar pedido
+3️⃣ Cancelar`;
+  }
+
+  } else {
+    reply = `👍 ¡Claro! Seguimos donde lo dejamos.
+
+¿Qué quieres hacer?`;
+
+    step = "MENU";
+  }
+} else
+
+   if (conversation.step === "WAITING_ORDER") {
   try {
     console.log("🧠 Interpretando pedido con DeepSeek...");
     console.log("📝 Texto recibido:", originalText);
@@ -269,20 +366,78 @@ export async function POST(request: NextRequest) {
     console.log(context);
 
     const parsedOrder = await parseOrder(
-      context,
+      buildOrderContext(pendingOrder, originalText),
       products
     );
 
     console.log("🧠 Pedido interpretado:");
     console.log(JSON.stringify(parsedOrder, null, 2));
 
-    /*
-     * =====================================================
-     * ACLARACIÓN
-     * =====================================================
-     */
+console.log("🔎 Texto original para reglas:", originalText);
 
-    if (parsedOrder.needsClarification) {
+const businessRuleResult = validateBusinessRules(
+  parsedOrder,
+  originalText
+);
+
+console.log("🔎 Resultado reglas:", businessRuleResult);
+
+if (!businessRuleResult.valid) {
+  const nextInvalidRequestAttempts =
+    conversation.invalidRequestAttempts + 1;
+
+  console.log(
+    "⚠️ Solicitud no permitida:",
+    nextInvalidRequestAttempts
+  );
+
+  if (nextInvalidRequestAttempts >= 2) {
+    reply = `🤝 Entiendo lo que quieres pedir, pero esa modificación no está disponible.
+
+Si quieres, puedo pasarte con una persona del equipo para que te ayude.
+
+1️⃣ Hablar con una persona
+2️⃣ Intentar nuevamente`;
+
+    status = "NEEDS_ATTENTION";
+    mode = "HUMAN";
+    step = "WAITING_ORDER";
+
+    await prisma.conversation.update({
+      where: {
+        id: conversation.id,
+      },
+      data: {
+        invalidRequestAttempts: nextInvalidRequestAttempts,
+        status,
+        mode,
+        step,
+        updatedAt: new Date(),
+      },
+    });
+  } else {
+    reply =
+      businessRuleResult.message ||
+      "🤔 Esa modificación no está disponible.";
+
+    status = "ACTIVE";
+    mode = "BOT";
+    step = "WAITING_ORDER";
+
+    await prisma.conversation.update({
+      where: {
+        id: conversation.id,
+      },
+      data: {
+        invalidRequestAttempts: nextInvalidRequestAttempts,
+        status,
+        mode,
+        step,
+        updatedAt: new Date(),
+      },
+    });
+  }
+} else if (parsedOrder.needsClarification) {
       const newPendingOrder = mergeOrders(
         pendingOrder,
         originalText
@@ -311,15 +466,18 @@ export async function POST(request: NextRequest) {
       step = "WAITING_ORDER";
     }
 
-    /*
-     * =====================================================
-     * PRODUCTO NO RECONOCIDO
-     * =====================================================
-     */
+    // =====================================================
+    // PRODUCTO NO RECONOCIDO
+    // =====================================================
 
     else if (parsedOrder.unrecognized.length > 0) {
       const nextFailedAttempts =
         conversation.failedAttempts + 1;
+
+      console.log(
+        "⚠️ Intento de interpretación:",
+        nextFailedAttempts
+      );
 
       if (nextFailedAttempts >= 4) {
         reply = `🤝 Parece que estamos teniendo problemas para entender tu pedido.
@@ -375,16 +533,24 @@ Si quieres, puedo pasarte con una persona del equipo para que te ayude.
       }
     }
 
-    /*
-     * =====================================================
-     * PEDIDO COMPLETO
-     * =====================================================
-     */
+    // =====================================================
+    // PEDIDO COMPLETO
+    // =====================================================
 
     else {
-      const validatedOrder = await validateOrder(
-        parsedOrder
-      );
+
+  await prisma.conversation.update({
+    where: {
+      id: conversation.id,
+    },
+    data: {
+      invalidRequestAttempts: 0,
+    },
+  });
+
+  const validatedOrder = await validateOrder(
+    parsedOrder
+  );
 
       const lines = validatedOrder.items.map((item) => {
         const base =
@@ -413,6 +579,7 @@ Total: $${validatedOrder.total.toLocaleString("es-CO")}
       mode = "BOT";
       step = "REVIEWING_ORDER";
 
+      // Guardamos el pedido interpretado para la siguiente etapa.
       await prisma.conversation.update({
         where: {
           id: conversation.id,
@@ -433,12 +600,7 @@ Total: $${validatedOrder.total.toLocaleString("es-CO")}
       error
     );
 
-    const message =
-      error instanceof Error
-        ? error.message
-        : "No pude procesar tu pedido.";
-
-    reply = `❌ ${message}
+    reply = `❌ No pude procesar tu pedido.
 
 Puedes intentar nuevamente escribiendo tu pedido.`;
 
@@ -446,6 +608,10 @@ Puedes intentar nuevamente escribiendo tu pedido.`;
     mode = "BOT";
     step = "WAITING_ORDER";
   }
+}
+
+else if (conversation.step === "REVIEWING_ORDER") {
+  // Aquí manejaremos 1, 2 y 3.
 }
 
     /*

@@ -1,5 +1,8 @@
+import type { ParsedOrder } from "./parse-order";
+
 export type PendingOrder = {
   conversation: string[];
+  parsedOrder?: ParsedOrder;
 };
 
 export function mergeOrders(
@@ -11,6 +14,7 @@ export function mergeOrders(
       ...(previous?.conversation ?? []),
       currentText,
     ],
+    parsedOrder: previous?.parsedOrder,
   };
 }
 
@@ -38,7 +42,11 @@ Interpreta el pedido completo utilizando el contexto anterior y el
 nuevo mensaje.
 
 No olvides productos que ya habían sido mencionados.
+
 Si anteriormente había una aclaración pendiente, utiliza la nueva
 respuesta para resolverla.
+
+Si el cliente está modificando algo que ya había pedido, interpreta
+la modificación sobre el pedido anterior.
 `;
 }
