@@ -18,6 +18,13 @@ enum ConversationMode {
   HUMAN
 }
 
+enum ConversationStep {
+  MENU
+  CATALOG
+  WAITING_ORDER
+  REVIEWING_ORDER
+}
+
 enum MessageSender {
   CUSTOMER
   BOT
@@ -39,6 +46,7 @@ model Conversation {
   name      String?
   status    ConversationStatus @default(ACTIVE)
   mode      ConversationMode @default(BOT)
+  step      ConversationStep @default(MENU)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -61,7 +69,6 @@ model Message {
 
 model Product {
   id          String   @id @default(cuid())
-  testField   String   @default("test")
   slug        String   @unique
   name        String
   description String?
