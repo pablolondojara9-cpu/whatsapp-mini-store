@@ -7,6 +7,7 @@ import {
   ConversationMode,
   ConversationStatus,
   ConversationStep,
+  Prisma,
 } from "../../generated/prisma/client";
 import {
   buildOrderContext,
@@ -266,6 +267,42 @@ const wasReminderSent =
     let mode: ConversationMode = conversation.mode;
     let step: ConversationStep = conversation.step;
 
+
+
+    const isHandoffChoicePrompt =
+  conversation.step === "WAITING_ORDER" &&
+  lastBotMessage?.text.includes("1️⃣ Hablar con una persona") &&
+  lastBotMessage?.text.includes("2️⃣ Intentar nuevamente");
+
+if (isHandoffChoicePrompt && text === "1") {
+  reply = `👤 Claro. Hemos recibido tu solicitud.
+
+Una persona del equipo te atenderá en breve.`;
+
+  status = "NEEDS_ATTENTION";
+  mode = "HUMAN";
+  step = "WAITING_ORDER";
+
+} else if (isHandoffChoicePrompt && text === "2") {
+  await prisma.conversation.update({
+    where: {
+      id: conversation.id,
+    },
+    data: {
+      invalidRequestAttempts: 0,
+      failedAttempts: 0,
+    },
+  });
+
+  reply = `👍 ¡Claro! Intentémoslo nuevamente.
+
+Escríbeme cómo quieres tu pedido y revisaremos las opciones disponibles.`;
+
+  status = "ACTIVE";
+  mode = "BOT";
+  step = "WAITING_ORDER";
+}
+
     /*
      * =========================================================
      * PEDIDO
@@ -278,7 +315,7 @@ const wasReminderSent =
      * =========================================================
      */
 
-    if (wasReminderSent && isContinuationMessage) {
+    else if (wasReminderSent && isContinuationMessage) {
   status = "ACTIVE";
   mode = "BOT";
 
@@ -400,52 +437,54 @@ if (!businessRuleResult.valid) {
     nextInvalidRequestAttempts
   );
 
-  if (nextInvalidRequestAttempts >= 2) {
-    reply = `🤝 Entiendo lo que quieres pedir, pero esa modificación no está disponible.
+ 
+if (nextInvalidRequestAttempts >= 2) {
+  reply = `🤝 Entiendo lo que quieres pedir, pero esa modificación no está disponible.
 
 Si quieres, puedo pasarte con una persona del equipo para que te ayude.
 
 1️⃣ Hablar con una persona
 2️⃣ Intentar nuevamente`;
 
-    status = "NEEDS_ATTENTION";
-    mode = "HUMAN";
-    step = "WAITING_ORDER";
+  status = "ACTIVE";
+  mode = "BOT";
+  step = "WAITING_ORDER";
 
-    await prisma.conversation.update({
-      where: {
-        id: conversation.id,
-      },
-      data: {
-        invalidRequestAttempts: nextInvalidRequestAttempts,
-        status,
-        mode,
-        step,
-        updatedAt: new Date(),
-      },
-    });
-  } else {
-    reply =
-      businessRuleResult.message ||
-      "🤔 Esa modificación no está disponible.";
+  await prisma.conversation.update({
+    where: {
+      id: conversation.id,
+    },
+    data: {
+      invalidRequestAttempts: nextInvalidRequestAttempts,
+      status,
+      mode,
+      step,
+      updatedAt: new Date(),
+    },
+  });
+} else {
+  reply =
+    businessRuleResult.message ||
+    "🤔 Esa modificación no está disponible.";
 
-    status = "ACTIVE";
-    mode = "BOT";
-    step = "WAITING_ORDER";
+  status = "ACTIVE";
+  mode = "BOT";
+  step = "WAITING_ORDER";
 
-    await prisma.conversation.update({
-      where: {
-        id: conversation.id,
-      },
-      data: {
-        invalidRequestAttempts: nextInvalidRequestAttempts,
-        status,
-        mode,
-        step,
-        updatedAt: new Date(),
-      },
-    });
-  }
+  await prisma.conversation.update({
+    where: {
+      id: conversation.id,
+    },
+    data: {
+      invalidRequestAttempts: nextInvalidRequestAttempts,
+      status,
+      mode,
+      step,
+      updatedAt: new Date(),
+    },
+  });
+}
+
 } else if (parsedOrder.needsClarification) {
       const newPendingOrder = mergeOrders(
         pendingOrder,
@@ -620,7 +659,229 @@ Puedes intentar nuevamente escribiendo tu pedido.`;
 }
 
 else if (conversation.step === "REVIEWING_ORDER") {
-  // Aquí manejaremos 1, 2 y 3.
+  const pendingOrder = conversation.pendingOrder as any;
+
+  // =====================================================
+  // CONFIRMAR PEDIDO
+  // =====================================================
+
+  if (text === "1") {
+    if (!pendingOrder?.items?.length) {
+      reply = `🤔 No encuentro un pedido pendiente para confirmar.
+
+Puedes volver a escribir tu pedido.`;
+
+      status = "ACTIVE";
+      mode = "BOT";
+      step = "WAITING_ORDER";
+    } else {
+      // Segunda barrera de seguridad antes de crear el pedido.
+      const hasInvalidModification = pendingOrder.items.some(
+        (item: any) => {
+          const notes = item.notes?.toLowerCase() ?? "";
+
+          return (
+            notes.includes("sin pan") ||
+            notes.includes("quitar el pan") ||
+            notes.includes("quitar pan") ||
+            notes.includes("sin el pan") ||
+            notes.includes("sin nada") ||
+            notes.includes("sin ingredientes") ||
+            notes.includes("sin gas")
+          );
+        }
+      );
+
+      if (hasInvalidModification) {
+        reply = `🤔 Tu pedido contiene una modificación que no está disponible.
+
+Puedes modificar el pedido antes de confirmarlo.`;
+
+        status = "ACTIVE";
+        mode = "BOT";
+        step = "WAITING_ORDER";
+      } else {
+        try {
+          const createdOrder = await prisma.$transaction(async (tx) => {
+            const orderItems = [];
+
+            for (const item of pendingOrder.items) {
+              const product = await tx.product.findUnique({
+                where: {
+                  slug: item.slug,
+                },
+              });
+
+              if (!product) {
+                throw new Error(
+                  `Producto no encontrado: ${item.slug}`
+                );
+              }
+
+              if (product.stock < item.quantity) {
+                throw new Error(
+                  `Stock insuficiente para: ${product.name}`
+                );
+              }
+
+              await tx.product.update({
+                where: {
+                  id: product.id,
+                },
+                data: {
+                  stock: {
+                    decrement: item.quantity,
+                  },
+                },
+              });
+
+              orderItems.push({
+                productId: product.id,
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+              });
+            }
+
+            return tx.order.create({
+              data: {
+                conversationId: conversation!.id,
+                status: "CONFIRMED",
+                total: pendingOrder.total,
+                items: {
+                  create: orderItems,
+                },
+              },
+            });
+          });
+
+          console.log(
+            "✅ Pedido creado:",
+            createdOrder.id
+          );
+
+          reply = `✅ ¡Pedido confirmado!
+
+Total: $${pendingOrder.total.toLocaleString("es-CO")}
+
+¡Gracias por comprar en La Esquina! 🛒`;
+
+          status = "ATTENDED";
+          mode = "BOT";
+          step = "MENU";
+
+          await prisma.conversation.update({
+            where: {
+              id: conversation.id,
+            },
+            data: {
+              pendingOrder: Prisma.JsonNull,
+              failedAttempts: 0,
+              invalidRequestAttempts: 0,
+              status,
+              mode,
+              step,
+              updatedAt: new Date(),
+            },
+          });
+        } catch (error) {
+          console.error(
+            "❌ Error confirmando pedido:",
+            error
+          );
+
+          reply =
+            error instanceof Error &&
+            error.message.includes("Stock insuficiente")
+              ? `⚠️ Lo siento, uno de los productos de tu pedido ya no tiene suficiente stock.
+
+Puedes modificar tu pedido e intentarlo nuevamente.`
+              : `❌ No pude confirmar tu pedido en este momento.
+
+Puedes intentarlo nuevamente.`;
+
+          status = "ACTIVE";
+          mode = "BOT";
+          step = "WAITING_ORDER";
+        }
+      }
+    }
+
+  // =====================================================
+  // MODIFICAR PEDIDO
+  // =====================================================
+
+  } else if (text === "2") {
+    reply = `🛠️ Perfecto, vamos a modificar tu pedido.
+
+Escríbeme qué quieres cambiar, agregar o quitar.`;
+
+    status = "ACTIVE";
+    mode = "BOT";
+    step = "WAITING_ORDER";
+
+  // =====================================================
+  // CANCELAR PEDIDO
+  // =====================================================
+
+  } else if (text === "3") {
+    reply = `❌ Pedido cancelado.
+
+¿Qué quieres hacer?
+
+1️⃣ Ver productos
+2️⃣ Hacer un pedido
+3️⃣ Hablar con alguien
+4️⃣ Despedirme`;
+
+    status = "ACTIVE";
+    mode = "BOT";
+    step = "MENU";
+
+    await prisma.conversation.update({
+      where: {
+        id: conversation.id,
+      },
+      data: {
+        pendingOrder: Prisma.JsonNull,
+        failedAttempts: 0,
+        invalidRequestAttempts: 0,
+        status,
+        mode,
+        step,
+        updatedAt: new Date(),
+      },
+    });
+
+  // =====================================================
+  // OTRA COSA
+  // =====================================================
+
+  } else {
+    const pendingLines = pendingOrder?.items?.length
+      ? pendingOrder.items.map((item: any) => {
+          const base =
+            `${item.quantity} × ${item.name} — $${item.subtotal.toLocaleString("es-CO")}`;
+
+          if (!item.notes) {
+            return base;
+          }
+
+          return `${base}\n   📝 ${item.notes}`;
+        })
+      : [];
+
+    reply = `🛒 Tu pedido sigue pendiente.
+
+${pendingLines.join("\n")}
+
+Total: $${pendingOrder?.total?.toLocaleString("es-CO") ?? "0"}
+
+¿Está correcto?
+
+1️⃣ Confirmar pedido
+2️⃣ Modificar pedido
+3️⃣ Cancelar`;
+  }
 }
 
     /*
