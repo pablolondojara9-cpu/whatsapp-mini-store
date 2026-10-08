@@ -438,7 +438,7 @@ if (!businessRuleResult.valid) {
   );
 
  
-if (nextInvalidRequestAttempts >= 2) {
+if (nextInvalidRequestAttempts >= 3) {
   reply = `🤝 Entiendo lo que quieres pedir, pero esa modificación no está disponible.
 
 Si quieres, puedo pasarte con una persona del equipo para que te ayude.
@@ -527,7 +527,7 @@ Si quieres, puedo pasarte con una persona del equipo para que te ayude.
         nextFailedAttempts
       );
 
-      if (nextFailedAttempts >= 4) {
+      if (nextFailedAttempts >= 3) {
         reply = `🤝 Parece que estamos teniendo problemas para entender tu pedido.
 
 Si quieres, puedo pasarte con una persona del equipo para que te ayude.
