@@ -2,12 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "../../lib/prisma";
 import { parseOrder } from "../../lib/parse-order";
 import { validateOrder } from "../../lib/validate-order";
+
 import {
   ConversationMode,
   ConversationStatus,
   ConversationStep,
 } from "../../generated/prisma/client";
-
 
 const VERIFY_TOKEN = "mini_store_token";
 
@@ -167,11 +167,11 @@ export async function POST(request: NextRequest) {
     if (!conversation) {
       conversation = await prisma.conversation.create({
         data: {
-  phone: from,
-  status: "ACTIVE",
-  mode: "BOT",
-  step: "MENU",
-},
+          phone: from,
+          status: "ACTIVE",
+          mode: "BOT",
+          step: "MENU",
+        },
       });
     }
 
@@ -194,6 +194,8 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    console.log("🧭 Estado actual de conversación:", conversation.step);
+
     // Si está en modo humano, el bot no responde.
     if (conversation.mode === "HUMAN") {
       console.log(
@@ -202,20 +204,6 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json({ received: true });
     }
-
-    /*
-     * ---------------------------------------------------------
-     * Detectamos cuál fue el último mensaje enviado por el bot.
-     *
-     * Esto nos permite distinguir:
-     *
-     * 1 → Ver productos
-     *
-     * de:
-     *
-     * 1 → Hacer pedido
-     * ---------------------------------------------------------
-     */
 
     const lastBotMessage = await prisma.message.findFirst({
       where: {
@@ -228,8 +216,109 @@ export async function POST(request: NextRequest) {
     });
 
     let reply = "";
-let status: ConversationStatus = conversation.status;
-let mode: ConversationMode = conversation.mode;
+
+    let status: ConversationStatus = conversation.status;
+    let mode: ConversationMode = conversation.mode;
+    let step: ConversationStep = conversation.step;
+
+    /*
+     * =========================================================
+     * PEDIDO
+     *
+     * IMPORTANTE:
+     * Esta comprobación va ANTES del menú.
+     *
+     * Si estamos esperando un pedido, cualquier texto del cliente
+     * pasa directamente a DeepSeek.
+     * =========================================================
+     */
+
+    if (conversation.step === "WAITING_ORDER") {
+      try {
+        console.log("🧠 Interpretando pedido con DeepSeek...");
+        console.log("📝 Texto recibido:", originalText);
+
+        const products = await prisma.product.findMany({
+          where: {
+            active: true,
+          },
+          select: {
+            slug: true,
+            name: true,
+            price: true,
+          },
+          orderBy: {
+            name: "asc",
+          },
+        });
+
+        const parsedOrder = await parseOrder(originalText, products);
+
+        console.log("🧠 Pedido interpretado:");
+        console.log(JSON.stringify(parsedOrder, null, 2));
+
+        if (parsedOrder.needsClarification) {
+          reply =
+            parsedOrder.clarificationQuestion ||
+            "🤔 No estoy seguro de qué quieres decir.\n\n¿Podrías revisar tu pedido y escribírmelo de nuevo?";
+
+          status = "ACTIVE";
+          mode = "BOT";
+          step = "WAITING_ORDER";
+        } else if (parsedOrder.unrecognized.length > 0) {
+          reply = `🤔 No estoy seguro de qué quieres decir.
+
+¿Podrías revisar tu pedido y escribírmelo de nuevo?`;
+
+          status = "ACTIVE";
+          mode = "BOT";
+          step = "WAITING_ORDER";
+        } else {
+          const validatedOrder = await validateOrder(parsedOrder);
+
+          const lines = validatedOrder.items.map(
+            (item) =>
+              `${item.quantity} × ${item.name} — $${item.subtotal.toLocaleString(
+                "es-CO"
+              )}`
+          );
+
+          reply = `🛒 Revisa tu pedido
+
+${lines.join("\n")}
+
+Total: $${validatedOrder.total.toLocaleString("es-CO")}
+
+¿Está correcto?
+
+1️⃣ Confirmar pedido
+2️⃣ Modificar pedido
+3️⃣ Cancelar`;
+
+          status = "ACTIVE";
+          mode = "BOT";
+          step = "REVIEWING_ORDER";
+        }
+      } catch (error) {
+        console.error(
+          "❌ Error interpretando pedido desde WhatsApp:",
+          error
+        );
+
+        const message =
+          error instanceof Error
+            ? error.message
+            : "No pude procesar tu pedido.";
+
+        reply = `❌ ${message}
+
+Puedes intentar nuevamente escribiendo tu pedido.`;
+
+        status = "ACTIVE";
+        mode = "BOT";
+        step = "WAITING_ORDER";
+      }
+    }
 
     /*
      * =========================================================
@@ -237,7 +326,7 @@ let mode: ConversationMode = conversation.mode;
      * =========================================================
      */
 
-    if (
+    else if (
       text === "hola" ||
       text === "holaa" ||
       text === "holaaa" ||
@@ -254,16 +343,12 @@ let mode: ConversationMode = conversation.mode;
 
       status = "ACTIVE";
       mode = "BOT";
+      step = "MENU";
     }
 
     /*
      * =========================================================
      * OPCIÓN 1
-     *
-     * Si el último mensaje del bot era el menú del catálogo,
-     * significa "Hacer pedido".
-     *
-     * Si no, significa "Ver productos".
      * =========================================================
      */
 
@@ -286,23 +371,12 @@ También puedes escribir simplemente los nombres de los productos.`;
 
         status = "ACTIVE";
         mode = "BOT";
-        
-conversation = await prisma.conversation.update({
-  where: {
-    id: conversation.id,
-  },
-  data: {
-    step: "WAITING_ORDER",
-  },
-});
-
+        step = "WAITING_ORDER";
       } else {
         status = "ACTIVE";
         mode = "BOT";
+        step = "CATALOG";
 
-        /*
-         * Primero enviamos el PDF.
-         */
         await sendWhatsAppDocument({
           accessToken,
           phoneNumberId,
@@ -310,10 +384,6 @@ conversation = await prisma.conversation.update({
           documentUrl: CATALOG_URL,
         });
 
-        /*
-         * Guardamos una representación del documento
-         * en el historial.
-         */
         await prisma.message.create({
           data: {
             conversationId: conversation.id,
@@ -322,10 +392,6 @@ conversation = await prisma.conversation.update({
           },
         });
 
-        /*
-         * Esperamos aproximadamente 1 segundo antes
-         * de enviar el siguiente mensaje.
-         */
         await new Promise((resolve) => setTimeout(resolve, 1000));
 
         reply = `🛍️ Ya puedes revisar nuestro catálogo.
@@ -342,12 +408,6 @@ conversation = await prisma.conversation.update({
      */
 
     else if (text === "2") {
-      /*
-       * Si el usuario está en el menú del catálogo,
-       * vuelve al menú principal.
-       *
-       * Si está en el menú principal, empieza el pedido.
-       */
       const isCatalogMenu =
         lastBotMessage?.text.includes(
           "Ya puedes revisar nuestro catálogo"
@@ -365,6 +425,7 @@ conversation = await prisma.conversation.update({
 
         status = "ACTIVE";
         mode = "BOT";
+        step = "MENU";
       } else {
         reply = `🛒 Perfecto.
 
@@ -378,6 +439,7 @@ También puedes escribir simplemente los nombres de los productos.`;
 
         status = "ACTIVE";
         mode = "BOT";
+        step = "WAITING_ORDER";
       }
     }
 
@@ -394,6 +456,7 @@ Una persona del equipo te atenderá en breve.`;
 
       status = "NEEDS_ATTENTION";
       mode = "HUMAN";
+      step = "MENU";
     }
 
     /*
@@ -411,6 +474,7 @@ Una persona del equipo te atenderá en breve.`;
 
       status = "ATTENDED";
       mode = "BOT";
+      step = "MENU";
     }
 
     /*
@@ -419,101 +483,22 @@ Una persona del equipo te atenderá en breve.`;
      * =========================================================
      */
 
-    else if (conversation.step === "WAITING_ORDER") {
-  try {
-    console.log("🧠 Interpretando pedido con DeepSeek...");
+    else {
+      reply = `🤔 No estoy seguro de qué quieres hacer.
 
-    const products = await prisma.product.findMany({
-      where: {
-        active: true,
-      },
-      select: {
-        slug: true,
-        name: true,
-        price: true,
-      },
-      orderBy: {
-        name: "asc",
-      },
-    });
-
-    const parsedOrder = await parseOrder(originalText, products);
-
-    console.log("🧠 Pedido interpretado:");
-    console.log(JSON.stringify(parsedOrder, null, 2));
-
-    if (parsedOrder.needsClarification) {
-      reply =
-        parsedOrder.clarificationQuestion ||
-        "Necesito un poco más de información para entender tu pedido.";
+Escribe "Hola" para ver el menú.`;
 
       status = "ACTIVE";
       mode = "BOT";
-    } else if (parsedOrder.unrecognized.length > 0) {
-      reply = `❌ No pude reconocer estos productos:
-
-${parsedOrder.unrecognized
-  .map((item) => `• ${item}`)
-  .join("\n")}
-
-Por favor, revisa el nombre e inténtalo nuevamente.`;
-
-      status = "ACTIVE";
-      mode = "BOT";
-    } else {
-      const validatedOrder = await validateOrder(parsedOrder);
-
-      const lines = validatedOrder.items.map(
-        (item) =>
-          `${item.quantity} × ${item.name} — $${item.subtotal.toLocaleString(
-            "es-CO"
-          )}`
-      );
-
-      reply = `🛒 Revisa tu pedido
-
-${lines.join("\n")}
-
-Total: $${validatedOrder.total.toLocaleString("es-CO")}
-
-¿Está correcto?
-
-1️⃣ Confirmar pedido
-2️⃣ Modificar pedido
-3️⃣ Cancelar`;
-
-      status = "ACTIVE";
-      mode = "BOT";
-
-      await prisma.conversation.update({
-        where: {
-          id: conversation.id,
-        },
-        data: {
-          step: "REVIEWING_ORDER",
-        },
-      });
+      step = "MENU";
     }
-  } catch (error) {
-    console.error("❌ Error interpretando pedido desde WhatsApp:", error);
-
-    const message =
-      error instanceof Error
-        ? error.message
-        : "No pude procesar tu pedido.";
-
-    reply = `❌ ${message}
-
-Puedes intentar nuevamente escribiendo tu pedido.`;
-
-    status = "ACTIVE";
-    mode = "BOT";
-  }
-}
 
     /*
-     * Actualizar estado y actividad.
+     * =========================================================
+     * ACTUALIZAR CONVERSACIÓN
+     * =========================================================
      */
+
     conversation = await prisma.conversation.update({
       where: {
         id: conversation.id,
@@ -521,13 +506,14 @@ Puedes intentar nuevamente escribiendo tu pedido.`;
       data: {
         status,
         mode,
+        step,
         updatedAt: new Date(),
       },
     });
 
     /*
      * =========================================================
-     * ENVIAR RESPUESTA DE TEXTO
+     * ENVIAR RESPUESTA
      * =========================================================
      */
 
@@ -539,9 +525,6 @@ Puedes intentar nuevamente escribiendo tu pedido.`;
         text: reply,
       });
 
-      /*
-       * Guardar respuesta del bot.
-       */
       await prisma.message.create({
         data: {
           conversationId: conversation.id,
