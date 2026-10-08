@@ -2,12 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "../../lib/prisma";
 import { parseOrder } from "../../lib/parse-order";
 import { validateOrder } from "../../lib/validate-order";
-
 import {
   ConversationMode,
   ConversationStatus,
   ConversationStep,
 } from "../../generated/prisma/client";
+import {
+  buildOrderContext,
+  mergeOrders,
+  type PendingOrder,
+} from "../../lib/merge-order";
 
 const VERIFY_TOKEN = "mini_store_token";
 
@@ -234,56 +238,166 @@ export async function POST(request: NextRequest) {
      */
 
     if (conversation.step === "WAITING_ORDER") {
-      try {
-        console.log("🧠 Interpretando pedido con DeepSeek...");
-        console.log("📝 Texto recibido:", originalText);
+  try {
+    console.log("🧠 Interpretando pedido con DeepSeek...");
+    console.log("📝 Texto recibido:", originalText);
 
-        const products = await prisma.product.findMany({
+    const products = await prisma.product.findMany({
+      where: {
+        active: true,
+      },
+      select: {
+        slug: true,
+        name: true,
+        price: true,
+      },
+      orderBy: {
+        name: "asc",
+      },
+    });
+
+    const pendingOrder = conversation.pendingOrder
+      ? (conversation.pendingOrder as PendingOrder)
+      : null;
+
+    const context = buildOrderContext(
+      pendingOrder,
+      originalText
+    );
+
+    console.log("🧠 Contexto enviado a DeepSeek:");
+    console.log(context);
+
+    const parsedOrder = await parseOrder(
+      context,
+      products
+    );
+
+    console.log("🧠 Pedido interpretado:");
+    console.log(JSON.stringify(parsedOrder, null, 2));
+
+    /*
+     * =====================================================
+     * ACLARACIÓN
+     * =====================================================
+     */
+
+    if (parsedOrder.needsClarification) {
+      const newPendingOrder = mergeOrders(
+        pendingOrder,
+        originalText
+      );
+
+      await prisma.conversation.update({
+        where: {
+          id: conversation.id,
+        },
+        data: {
+          pendingOrder: newPendingOrder,
+          failedAttempts: 0,
+          status: "ACTIVE",
+          mode: "BOT",
+          step: "WAITING_ORDER",
+          updatedAt: new Date(),
+        },
+      });
+
+      reply =
+        parsedOrder.clarificationQuestion ||
+        "🤔 Necesito un poco más de información para completar tu pedido.";
+
+      status = "ACTIVE";
+      mode = "BOT";
+      step = "WAITING_ORDER";
+    }
+
+    /*
+     * =====================================================
+     * PRODUCTO NO RECONOCIDO
+     * =====================================================
+     */
+
+    else if (parsedOrder.unrecognized.length > 0) {
+      const nextFailedAttempts =
+        conversation.failedAttempts + 1;
+
+      if (nextFailedAttempts >= 4) {
+        reply = `🤝 Parece que estamos teniendo problemas para entender tu pedido.
+
+Si quieres, puedo pasarte con una persona del equipo para que te ayude.
+
+1️⃣ Hablar con una persona
+2️⃣ Intentar nuevamente`;
+
+        status = "NEEDS_ATTENTION";
+        mode = "HUMAN";
+        step = "WAITING_ORDER";
+
+        await prisma.conversation.update({
           where: {
-            active: true,
+            id: conversation.id,
           },
-          select: {
-            slug: true,
-            name: true,
-            price: true,
-          },
-          orderBy: {
-            name: "asc",
+          data: {
+            failedAttempts: nextFailedAttempts,
+            status,
+            mode,
+            step,
+            updatedAt: new Date(),
           },
         });
+      } else {
+        const newPendingOrder = mergeOrders(
+          pendingOrder,
+          originalText
+        );
 
-        const parsedOrder = await parseOrder(originalText, products);
-
-        console.log("🧠 Pedido interpretado:");
-        console.log(JSON.stringify(parsedOrder, null, 2));
-
-        if (parsedOrder.needsClarification) {
-          reply =
-            parsedOrder.clarificationQuestion ||
-            "🤔 No estoy seguro de qué quieres decir.\n\n¿Podrías revisar tu pedido y escribírmelo de nuevo?";
-
-          status = "ACTIVE";
-          mode = "BOT";
-          step = "WAITING_ORDER";
-        } else if (parsedOrder.unrecognized.length > 0) {
-          reply = `🤔 No estoy seguro de qué quieres decir.
+        reply = `🤔 No estoy seguro de qué quieres decir.
 
 ¿Podrías revisar tu pedido y escribírmelo de nuevo?`;
 
-          status = "ACTIVE";
-          mode = "BOT";
-          step = "WAITING_ORDER";
-        } else {
-          const validatedOrder = await validateOrder(parsedOrder);
+        status = "ACTIVE";
+        mode = "BOT";
+        step = "WAITING_ORDER";
 
-          const lines = validatedOrder.items.map(
-            (item) =>
-              `${item.quantity} × ${item.name} — $${item.subtotal.toLocaleString(
-                "es-CO"
-              )}`
-          );
+        await prisma.conversation.update({
+          where: {
+            id: conversation.id,
+          },
+          data: {
+            pendingOrder: newPendingOrder,
+            failedAttempts: nextFailedAttempts,
+            status,
+            mode,
+            step,
+            updatedAt: new Date(),
+          },
+        });
+      }
+    }
 
-          reply = `🛒 Revisa tu pedido
+    /*
+     * =====================================================
+     * PEDIDO COMPLETO
+     * =====================================================
+     */
+
+    else {
+      const validatedOrder = await validateOrder(
+        parsedOrder
+      );
+
+      const lines = validatedOrder.items.map((item) => {
+        const base =
+          `${item.quantity} × ${item.name} — $${item.subtotal.toLocaleString("es-CO")}`;
+
+        if (!item.notes) {
+          return base;
+        }
+
+        return `${base}\n   📝 ${item.notes}`;
+      });
+
+      reply = `🛒 Revisa tu pedido
 
 ${lines.join("\n")}
 
@@ -295,30 +409,44 @@ Total: $${validatedOrder.total.toLocaleString("es-CO")}
 2️⃣ Modificar pedido
 3️⃣ Cancelar`;
 
-          status = "ACTIVE";
-          mode = "BOT";
-          step = "REVIEWING_ORDER";
-        }
-      } catch (error) {
-        console.error(
-          "❌ Error interpretando pedido desde WhatsApp:",
-          error
-        );
+      status = "ACTIVE";
+      mode = "BOT";
+      step = "REVIEWING_ORDER";
 
-        const message =
-          error instanceof Error
-            ? error.message
-            : "No pude procesar tu pedido.";
+      await prisma.conversation.update({
+        where: {
+          id: conversation.id,
+        },
+        data: {
+          pendingOrder: parsedOrder,
+          failedAttempts: 0,
+          status,
+          mode,
+          step,
+          updatedAt: new Date(),
+        },
+      });
+    }
+  } catch (error) {
+    console.error(
+      "❌ Error interpretando pedido desde WhatsApp:",
+      error
+    );
 
-        reply = `❌ ${message}
+    const message =
+      error instanceof Error
+        ? error.message
+        : "No pude procesar tu pedido.";
+
+    reply = `❌ ${message}
 
 Puedes intentar nuevamente escribiendo tu pedido.`;
 
-        status = "ACTIVE";
-        mode = "BOT";
-        step = "WAITING_ORDER";
-      }
-    }
+    status = "ACTIVE";
+    mode = "BOT";
+    step = "WAITING_ORDER";
+  }
+}
 
     /*
      * =========================================================
