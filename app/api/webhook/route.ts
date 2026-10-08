@@ -291,10 +291,24 @@ Puedes continuar escribiéndome los productos que deseas.`;
 
 Puedes revisar el catálogo o indicarme qué quieres pedir.`;
 
-  } else if (conversation.step === "REVIEWING_ORDER") {
+
+} else if (conversation.step === "REVIEWING_ORDER") {
   const pendingOrder = conversation.pendingOrder as any;
 
-  if (pendingOrder?.items?.length) {
+  const businessRuleResult = validateBusinessRules(
+    pendingOrder,
+    originalText
+  );
+
+  if (!businessRuleResult.valid) {
+    reply =
+      businessRuleResult.message ||
+      "🤔 Ese pedido tiene una modificación que no está disponible.";
+
+    status = "ACTIVE";
+    mode = "BOT";
+    step = "WAITING_ORDER";
+  } else if (pendingOrder?.items?.length) {
     const lines = pendingOrder.items.map((item: any) => {
       const base =
         `${item.quantity} × ${item.name} — $${item.subtotal.toLocaleString("es-CO")}`;
@@ -324,14 +338,9 @@ Total: $${pendingOrder.total.toLocaleString("es-CO")}
 2️⃣ Modificar pedido
 3️⃣ Cancelar`;
   }
+}
 
-  } else {
-    reply = `👍 ¡Claro! Seguimos donde lo dejamos.
-
-¿Qué quieres hacer?`;
-
-    step = "MENU";
-  }
+ 
 } else
 
    if (conversation.step === "WAITING_ORDER") {

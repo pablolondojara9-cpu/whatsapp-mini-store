@@ -41,19 +41,29 @@ export function validateBusinessRules(
   }
 
   // Hamburguesa sin pan
-  if (
-    (text.includes("hamburguesa") ||
-      parsedOrder.items.some((item) =>
-        item.slug.includes("hamburguesa")
-      )) &&
-    text.includes("sin pan")
-  ) {
-    return {
-      valid: false,
-      message:
-        "🤔 No es posible venderte una hamburguesa sin pan.\n\nSi quieres modificar algún ingrediente, dime cuál.",
-    };
-  }
+const hasHamburger = parsedOrder.items.some((item) =>
+  item.slug.includes("hamburguesa")
+);
+
+const hasNoBreadRequest =
+  text.includes("sin pan") ||
+  text.includes("quitar el pan") ||
+  text.includes("quitar pan") ||
+  text.includes("sin el pan") ||
+  parsedOrder.items.some((item) =>
+    item.notes?.toLowerCase().includes("sin pan")
+  );
+
+if (
+  (text.includes("hamburguesa") || hasHamburger) &&
+  hasNoBreadRequest
+) {
+  return {
+    valid: false,
+    message:
+      "🤔 No es posible venderte una hamburguesa sin pan.\n\nSi quieres modificar algún ingrediente, dime cuál.",
+  };
+}
 
   // Gaseosa sin gas
   if (
