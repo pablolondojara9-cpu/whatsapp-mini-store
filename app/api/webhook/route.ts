@@ -428,7 +428,24 @@ const businessRuleResult = validateBusinessRules(
 
 console.log("🔎 Resultado reglas:", businessRuleResult);
 
-if (!businessRuleResult.valid) {
+if (parsedOrder.intent === "QUESTION") {
+  reply =
+    parsedOrder.response ||
+    "🤔 No tengo esa información confirmada en este momento.";
+
+  status = "ACTIVE";
+  mode = "BOT";
+  step = conversation.step;
+} else if (parsedOrder.intent === "HUMAN_HANDOFF") {
+  reply = `👤 Claro. Hemos recibido tu solicitud.
+
+Una persona del equipo te atenderá en breve.`;
+
+  status = "NEEDS_ATTENTION";
+  mode = "HUMAN";
+  step = conversation.step;
+} else if (!businessRuleResult.valid) {
+  
   const nextInvalidRequestAttempts =
     conversation.invalidRequestAttempts + 1;
 

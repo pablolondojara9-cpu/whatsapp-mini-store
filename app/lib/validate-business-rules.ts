@@ -137,10 +137,9 @@ export function validateBusinessRules(
     }
   }
 
-  /*
-   * REGLA 3: Si preguntan por quitar el pan de cualquier
-   * producto, no pedir una aclaración que dé a entender
-   * que sí se puede hacer.
+   /*
+   * REGLA 3: No permitir quitar o sustituir el pan
+   * por ingredientes que no forman parte de las opciones disponibles.
    */
   const asksAboutAnyProduct = mentionsAny(text, [
     "algun producto",
@@ -151,13 +150,13 @@ export function validateBusinessRules(
 
   if (
     asksAboutAnyProduct &&
-    mentionsAny(text, ["pan", "arepa", "arepas"]) &&
+    mentionsAny(text, ["pan"]) &&
     isRemovalRequest(text)
   ) {
     return {
       valid: false,
       message:
-        "🤔 No podemos quitar el pan ni sustituirlo por arepas en los productos del catálogo.\n\nSi deseas una modificación válida, dime cuál ingrediente quieres retirar.",
+        "🤔 No podemos quitar ni sustituir ingredientes esenciales de los productos del catálogo.\n\nSi deseas una modificación, dime qué ingrediente quieres retirar.",
     };
   }
 

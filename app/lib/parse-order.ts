@@ -6,7 +6,16 @@ export type OrderItemParsed = {
   notes: string | null;
 };
 
+export type MessageIntent =
+  | "ORDER"
+  | "MODIFICATION"
+  | "QUESTION"
+  | "CLARIFICATION"
+  | "HUMAN_HANDOFF";
+
 export type ParsedOrder = {
+  intent: MessageIntent;
+  response: string | null;
   items: OrderItemParsed[];
   unrecognized: string[];
   needsClarification: boolean;
@@ -34,6 +43,62 @@ export async function parseOrder(
 
   const systemPrompt = `
 Eres el asistente de pedidos de La Esquina.
+
+CLASIFICACIÓN DE LA INTENCIÓN DEL CLIENTE
+
+Antes de interpretar los productos, identifica la intención principal
+del mensaje y devuelve el campo "intent" en el JSON.
+
+Utiliza únicamente estas categorías:
+
+- "ORDER": el cliente quiere pedir uno o varios productos.
+- "MODIFICATION": el cliente quiere cambiar, agregar o quitar algo
+  de un pedido existente.
+- "QUESTION": el cliente hace una pregunta sobre el negocio,
+  sus productos, precios, horarios o servicios.
+- "CLARIFICATION": el cliente responde a una pregunta que el bot
+  hizo para aclarar su pedido.
+- "HUMAN_HANDOFF": el cliente pide hablar con una persona.
+
+REGLAS IMPORTANTES:
+
+1. Una pregunta no es automáticamente un pedido fallido.
+
+2. Si el cliente pregunta algo sobre un producto, clasifica el
+   mensaje como "QUESTION", salvo que también esté solicitando
+   claramente hacer o modificar un pedido.
+
+3. Si el cliente quiere cambiar un pedido existente, utiliza
+   "MODIFICATION" y conserva el contexto disponible.
+
+4. Si el cliente responde a una aclaración que el bot hizo
+   anteriormente, utiliza "CLARIFICATION".
+
+5. Si solicita hablar con una persona, utiliza "HUMAN_HANDOFF".
+
+6. No inventes información para responder preguntas del negocio.
+   Este sistema clasifica intenciones; no debe asumir datos que
+   no estén disponibles.
+
+7. Incluye siempre el campo "intent" en el JSON de respuesta,
+   además de los campos de pedido que ya existen.
+
+EJEMPLOS DE CLASIFICACIÓN:
+
+"Quiero dos hamburguesas clásicas"
+→ "ORDER"
+
+"¿La hamburguesa viene con queso?"
+→ "QUESTION"
+
+"Quítale la cebolla a la hamburguesa"
+→ "MODIFICATION"
+
+"Quiero la Coca-Cola"
+→ "CLARIFICATION", si el bot acababa de preguntar qué gaseosa quería.
+
+"Quiero hablar con alguien"
+→ "HUMAN_HANDOFF"
 
 Tu única tarea es interpretar lo que el cliente quiere pedir y
 convertirlo en un pedido estructurado utilizando EXCLUSIVAMENTE
@@ -495,6 +560,8 @@ Nunca escribas explicaciones fuera del JSON.
 La respuesta debe tener exactamente esta estructura:
 
 {
+  "intent": "ORDER",
+  "response": null
   "items": [
     {
       "slug": "string",
@@ -510,6 +577,8 @@ La respuesta debe tener exactamente esta estructura:
 Si necesitas aclaración:
 
 {
+  "intent": "CLARIFICATION",
+  "response": null
   "items": [],
   "unrecognized": [],
   "needsClarification": true,
@@ -729,6 +798,25 @@ en:
 "hamburguesa clásica sin cebolla, sin tomate y sin salsa".
 
 No conviertas una solicitud imposible en una modificación válida.
+
+RESPUESTA A PREGUNTAS INFORMATIVAS
+
+Incluye siempre el campo "response" en el JSON.
+
+- Si el mensaje es una pregunta informativa y la respuesta está
+  respaldada por la información disponible, escribe la respuesta
+  en "response".
+- Utiliza únicamente información que conozcas por los datos
+  disponibles del negocio y del catálogo.
+- No inventes ingredientes, horarios, servicios, precios ni políticas.
+- Si no tienes información suficiente para responder, utiliza
+  "response": null.
+- Para los mensajes que no sean preguntas informativas, utiliza
+  "response": null.
+
+La respuesta informativa no debe confundirse con una aclaración
+del pedido ni con un producto solicitado.
+
 `;
 
   const response = await deepseek.chat.completions.create({
